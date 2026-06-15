@@ -21,6 +21,8 @@ const mono = JetBrains_Mono({
   display: "swap",
 });
 
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: copy.pageTitle,
   description: copy.pageDescription,
