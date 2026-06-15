@@ -451,6 +451,7 @@ export function queryTrendingTickers(
 ): TrendingTickerRow[] {
   const db = getDb();
   // Pick the latest snapshot per ticker for this window.
+  // LEFT JOIN ensures tickers with 0 mentions still appear.
   const sql = `
     WITH latest AS (
       SELECT ts.*,
@@ -458,17 +459,16 @@ export function queryTrendingTickers(
       FROM trend_snapshots ts
       WHERE ts.window = @window
     )
-    SELECT l.ticker_symbol,
+    SELECT t.symbol AS ticker_symbol,
            t.name AS ticker_name,
            t.category AS category,
-           l.mention_count,
+           COALESCE(l.mention_count, 0) AS mention_count,
            l.sentiment_avg,
            l.velocity,
            l.window_start
-    FROM latest l
-    JOIN tickers t ON t.symbol = l.ticker_symbol
-    WHERE l.rn = 1
-    ORDER BY l.mention_count DESC, l.velocity DESC
+    FROM tickers t
+    LEFT JOIN latest l ON l.ticker_symbol = t.symbol AND l.rn = 1
+    ORDER BY mention_count DESC, l.velocity DESC
     LIMIT @limit
   `;
   return db.prepare(sql).all({ window, limit }) as TrendingTickerRow[];

@@ -1,0 +1,17 @@
+node_modules
+.next
+db
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.local
+.env*.local
+.git
+.gitignore
+pm2.config.cjs
+server.js
+scripts/check-db.cjs
+scripts/run-sentiment.mjs
+README.md

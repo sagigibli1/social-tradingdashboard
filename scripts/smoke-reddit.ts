@@ -40,11 +40,6 @@ function loadDotEnvLocal(): void {
 async function main() {
   loadDotEnvLocal();
 
-  if (!process.env.APIFY_API_TOKEN) {
-    console.error("APIFY_API_TOKEN not set. Add it to .env.local first.");
-    process.exit(1);
-  }
-
   const t0 = Date.now();
   const result = await redditIngestor.run();
   const elapsedSec = ((Date.now() - t0) / 1000).toFixed(1);

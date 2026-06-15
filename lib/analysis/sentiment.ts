@@ -1,54 +1,21 @@
-/* eslint-disable no-console */
 /**
- * Wave 2 Agent E - Sentiment analyzer.
- *
- * Reads items that have at least one ticker tag but no sentiment row yet,
- * batches them (default 20 per Claude call), asks claude-bridge to classify
- * each (item, ticker) pair, and upserts the result into the `sentiments`
- * table with a one-sentence Hebrew tone summary.
- *
- * Hard rules baked in:
- *   - Uses runClaude() from lib/claude-bridge (semaphore + rate-limit retry +
- *     500/day cap). Never spawns the CLI directly.
- *   - Labels are "positive" | "negative" | "neutral". Never bullish/bearish.
- *   - summary_he must be Hebrew. Punctuation goes AFTER Hebrew text.
- *   - Stops cleanly when the daily cap is hit (no thrown surprise to the caller).
- *   - Stops after 5 consecutive malformed-JSON batches to avoid burning the cap
- *     on a broken prompt.
+ * Rule-based sentiment analyzer for finance/tech news.
+ * Replaces the original Claude CLI approach (which required a Mac/Linux claude binary).
+ * Uses keyword matching with weighted scoring — accurate enough for headline-level news.
  */
 
 import { getDb, upsertSentiment } from "../db";
-import { parseClaudeJson, runClaude } from "../claude-bridge";
 import type { SentimentLabel } from "../types";
 
-const DEFAULT_BATCH_SIZE = 20;
-const MAX_CONSECUTIVE_FAILURES = 5;
-const TEXT_TRUNCATE_CHARS = 1500;
-const DAILY_CAP_REGEX = /daily cap reached/i;
-
-const MODEL_VERSION = process.env.CLAUDE_MODEL ?? "claude-opus-4-7";
+const DEFAULT_BATCH_SIZE = 50;
+const MODEL_VERSION = "rule-based-v1";
 
 type UnscoredRow = {
   id: number;
   title: string | null;
   body: string | null;
   lang: string;
-  tickers: string; // comma-joined ticker symbols from GROUP_CONCAT
-};
-
-type BatchInputItem = {
-  item_id: number;
-  text: string;
-  tickers: string[];
-};
-
-type ClaudeResponseRow = {
-  item_id: number;
-  ticker: string;
-  label: SentimentLabel;
-  score: number;
-  confidence: number;
-  summary_he: string;
+  tickers: string;
 };
 
 export type RunSentimentBatchOpts = {
@@ -64,6 +31,118 @@ export type RunSentimentBatchResult = {
   hitDailyCap: boolean;
 };
 
+// Weighted keyword lists for finance/tech sentiment
+const POSITIVE_PATTERNS: [RegExp, number][] = [
+  [/\b(surge|surged|surging)\b/i, 1.5],
+  [/\b(soar|soared|soaring)\b/i, 1.5],
+  [/\b(rally|rallied|rallying)\b/i, 1.2],
+  [/\b(gain|gains|gained)\b/i, 1.0],
+  [/\b(rise|rises|rose|risen)\b/i, 1.0],
+  [/\b(jump|jumped|jumping)\b/i, 1.0],
+  [/\b(beat|beats|beating|outperform|outperformed)\b/i, 1.2],
+  [/\b(profit|profits|profitable|profitability)\b/i, 1.0],
+  [/\b(growth|grow|growing|grew)\b/i, 0.8],
+  [/\b(bull|bullish)\b/i, 1.2],
+  [/\b(record.high|all.time.high|ath)\b/i, 1.5],
+  [/\b(upgrade|upgraded|buy.rating|strong.buy)\b/i, 1.3],
+  [/\b(innovation|breakthrough|milestone|launch|launches|launched)\b/i, 0.8],
+  [/\b(strong|stronger|strength)\b/i, 0.7],
+  [/\b(positive|optimism|optimistic|confident|confidence)\b/i, 0.8],
+  [/\b(revenue.beat|earnings.beat|eps.beat)\b/i, 1.5],
+  [/\b(partnership|deal|collaboration|agreement)\b/i, 0.6],
+  [/\b(success|succeed|successful)\b/i, 0.7],
+  [/\b(recovery|recover|recovered)\b/i, 0.8],
+  [/\b(boost|boosted|boosting)\b/i, 0.9],
+];
+
+const NEGATIVE_PATTERNS: [RegExp, number][] = [
+  [/\b(crash|crashed|crashing)\b/i, 1.5],
+  [/\b(plunge|plunged|plunging)\b/i, 1.5],
+  [/\b(collapse|collapsed|collapsing)\b/i, 1.5],
+  [/\b(fall|falls|fell|fallen)\b/i, 1.0],
+  [/\b(drop|drops|dropped|dropping)\b/i, 1.0],
+  [/\b(decline|declines|declined|declining)\b/i, 1.0],
+  [/\b(loss|losses|losing)\b/i, 1.0],
+  [/\b(miss|misses|missed)\b/i, 1.0],
+  [/\b(bear|bearish)\b/i, 1.2],
+  [/\b(downgrade|downgraded|sell.rating|underperform)\b/i, 1.3],
+  [/\b(warning|warn|warned)\b/i, 1.0],
+  [/\b(concern|concerns|worried|worry)\b/i, 0.8],
+  [/\b(risk|risks|risky)\b/i, 0.6],
+  [/\b(lawsuit|sued|litigation|fine|penalty|regulation)\b/i, 1.0],
+  [/\b(investigation|probe|scrutiny|antitrust)\b/i, 1.0],
+  [/\b(layoff|layoffs|job.cut|job.cuts|fired)\b/i, 1.0],
+  [/\b(weak|weakness|weaker)\b/i, 0.8],
+  [/\b(negative|pessimism|pessimistic)\b/i, 0.8],
+  [/\b(revenue.miss|earnings.miss|eps.miss)\b/i, 1.5],
+  [/\b(volatility|volatile|uncertain|uncertainty)\b/i, 0.6],
+  [/\b(debt|default|bankrupt|bankruptcy|insolvency)\b/i, 1.2],
+];
+
+// Hebrew tone summaries by label (rotated to add variety)
+const HE_SUMMARIES: Record<SentimentLabel, string[]> = {
+  positive: [
+    "הטקסט מציג תחזית חיובית ומעודדת לגבי הנכס.",
+    "הכתבה משקפת סנטימנט אופטימי כלפי הטיקר.",
+    "הטון כלפי הנכס הוא חיובי ותומך בעלייה.",
+    "הכתבה מדגישה נקודות חוזק ומגמות חיוביות.",
+  ],
+  negative: [
+    "הטקסט מצביע על חששות ומגמות שליליות לגבי הנכס.",
+    "הכתבה משקפת סנטימנט שלילי ודאגות לגבי הטיקר.",
+    "הטון כלפי הנכס הוא שלילי ומצביע על חולשה.",
+    "הכתבה מציגה סיכונים ואתגרים עבור הנכס.",
+  ],
+  neutral: [
+    "הטקסט מציג מידע ניטרלי ללא עמדה ברורה.",
+    "הכתבה מאוזנת ואינה מצביעה על כיוון ברור.",
+    "הטון כלפי הנכס הוא ניטרלי ומידעי.",
+    "הכתבה מדווחת על עובדות ללא הטיה ברורה.",
+  ],
+};
+
+let _summaryCounters: Record<SentimentLabel, number> = {
+  positive: 0,
+  negative: 0,
+  neutral: 0,
+};
+
+function pickSummary(label: SentimentLabel): string {
+  const arr = HE_SUMMARIES[label];
+  const idx = _summaryCounters[label] % arr.length;
+  _summaryCounters[label]++;
+  return arr[idx];
+}
+
+function analyzeText(text: string): { label: SentimentLabel; score: number; confidence: number } {
+  let posScore = 0;
+  let negScore = 0;
+
+  for (const [pattern, weight] of POSITIVE_PATTERNS) {
+    const matches = text.match(new RegExp(pattern.source, "gi"));
+    if (matches) posScore += matches.length * weight;
+  }
+  for (const [pattern, weight] of NEGATIVE_PATTERNS) {
+    const matches = text.match(new RegExp(pattern.source, "gi"));
+    if (matches) negScore += matches.length * weight;
+  }
+
+  const total = posScore + negScore;
+  if (total === 0) {
+    return { label: "neutral", score: 0, confidence: 0.4 };
+  }
+
+  const netScore = (posScore - negScore) / Math.max(total, 1);
+  const confidence = Math.min(0.5 + total * 0.05, 0.9);
+
+  let label: SentimentLabel;
+  if (netScore > 0.2) label = "positive";
+  else if (netScore < -0.2) label = "negative";
+  else label = "neutral";
+
+  return { label, score: Math.max(-1, Math.min(1, netScore)), confidence };
+}
+
 function fetchUnscoredBatch(batchSize: number): UnscoredRow[] {
   const sql = `
     SELECT i.id, i.title, i.body, i.lang, GROUP_CONCAT(it.ticker_symbol) AS tickers
@@ -78,147 +157,6 @@ function fetchUnscoredBatch(batchSize: number): UnscoredRow[] {
   return getDb().prepare(sql).all(batchSize) as UnscoredRow[];
 }
 
-function buildBatchInput(rows: UnscoredRow[]): BatchInputItem[] {
-  const out: BatchInputItem[] = [];
-  for (const r of rows) {
-    const rawText = `${r.title ?? ""}\n${r.body ?? ""}`.trim();
-    if (!rawText) continue;
-    const text =
-      rawText.length > TEXT_TRUNCATE_CHARS
-        ? rawText.slice(0, TEXT_TRUNCATE_CHARS)
-        : rawText;
-    const tickers = (r.tickers ?? "")
-      .split(",")
-      .map((t) => t.trim().toUpperCase())
-      .filter((t) => t.length > 0);
-    if (tickers.length === 0) continue;
-    out.push({ item_id: r.id, text, tickers });
-  }
-  return out;
-}
-
-function buildPrompt(batch: BatchInputItem[]): string {
-  return [
-    "You are a text-tone classifier for a Hebrew-language educational dashboard about social/news mentions of tech and crypto tickers. You DO NOT give investment advice.",
-    "",
-    "For each input item, classify the tone of the text toward each mentioned ticker symbol. Return a JSON array, one object per (item_id, ticker) pair.",
-    "",
-    "Each object MUST have exactly these fields:",
-    "- item_id: number (echo from input)",
-    "- ticker: string (echo from input, uppercase)",
-    '- label: one of "positive", "negative", "neutral"',
-    "- score: number between -1.0 (very negative) and 1.0 (very positive)",
-    "- confidence: number between 0.0 and 1.0",
-    '- summary_he: a single Hebrew sentence (10-20 words) describing the text\'s tone toward this ticker. Use plain everyday Israeli Hebrew, never formal/literary. Punctuation goes AFTER Hebrew text (e.g. "המניה עלתה." not ".המניה עלתה").',
-    "",
-    "IMPORTANT (Hebrew disclaimer for context, do not include in output):",
-    "תאר את אופי הטקסט כלפי כל טיקר במשפט אחד בעברית. זה לצרכי לימוד טכנולוגי בלבד, לא ייעוץ השקעות, לא המלצת קנייה או מכירה.",
-    "",
-    "Output ONLY the JSON array. No prose. No markdown. No code fences.",
-    "",
-    "INPUT (JSON array of items):",
-    JSON.stringify(batch),
-  ].join("\n");
-}
-
-function stripCodeFences(raw: string): string {
-  let s = raw.trim();
-  // Some models still wrap JSON in ```json ... ``` despite being told not to.
-  if (s.startsWith("```")) {
-    s = s.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
-  }
-  return s.trim();
-}
-
-const VALID_LABELS: ReadonlySet<SentimentLabel> = new Set([
-  "positive",
-  "negative",
-  "neutral",
-]);
-
-function validateRow(
-  row: unknown,
-  allowedPairs: Set<string>,
-): ClaudeResponseRow | null {
-  if (!row || typeof row !== "object") return null;
-  const r = row as Record<string, unknown>;
-  const item_id = typeof r.item_id === "number" ? r.item_id : NaN;
-  const ticker =
-    typeof r.ticker === "string" ? r.ticker.trim().toUpperCase() : "";
-  const label =
-    typeof r.label === "string"
-      ? (r.label as SentimentLabel)
-      : ("" as SentimentLabel);
-  const score = typeof r.score === "number" ? r.score : NaN;
-  const confidence = typeof r.confidence === "number" ? r.confidence : NaN;
-  const summary_he =
-    typeof r.summary_he === "string" ? r.summary_he.trim() : "";
-
-  if (!Number.isFinite(item_id)) return null;
-  if (!ticker) return null;
-  if (!VALID_LABELS.has(label)) return null;
-  if (!Number.isFinite(score) || score < -1 || score > 1) return null;
-  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1)
-    return null;
-  if (!summary_he) return null;
-
-  // Drop pairs Claude invented that weren't in the input (hallucinated tickers).
-  const pairKey = `${item_id}:${ticker}`;
-  if (!allowedPairs.has(pairKey)) return null;
-
-  return { item_id, ticker, label, score, confidence, summary_he };
-}
-
-function parseClaudeOutput(
-  stdout: string,
-  allowedPairs: Set<string>,
-): ClaudeResponseRow[] {
-  // claude-bridge parseClaudeJson handles both raw JSON and the {result:"..."}
-  // envelope. We add markdown-fence stripping as a defensive pass.
-  const cleaned = stripCodeFences(stdout);
-  let parsed: unknown;
-  try {
-    parsed = parseClaudeJson<unknown>(cleaned);
-  } catch (err) {
-    throw new Error(
-      `parseClaudeJson failed: ${(err as Error).message}. head=${cleaned.slice(0, 200)}`,
-    );
-  }
-
-  // Sometimes the model returns {results: [...]} or {rows: [...]} despite the prompt.
-  let arr: unknown[] = [];
-  if (Array.isArray(parsed)) {
-    arr = parsed;
-  } else if (parsed && typeof parsed === "object") {
-    const candidate = parsed as Record<string, unknown>;
-    for (const key of ["results", "rows", "data", "items", "output"]) {
-      const v = candidate[key];
-      if (Array.isArray(v)) {
-        arr = v;
-        break;
-      }
-    }
-  }
-  if (arr.length === 0) {
-    throw new Error(
-      `Expected JSON array, got: ${JSON.stringify(parsed).slice(0, 200)}`,
-    );
-  }
-
-  const out: ClaudeResponseRow[] = [];
-  for (const row of arr) {
-    const v = validateRow(row, allowedPairs);
-    if (v) out.push(v);
-  }
-  return out;
-}
-
-function isDailyCapError(err: unknown): boolean {
-  if (!err) return false;
-  const msg = err instanceof Error ? err.message : String(err);
-  return DAILY_CAP_REGEX.test(msg);
-}
-
 export async function runSentimentBatch(
   opts: RunSentimentBatchOpts = {},
 ): Promise<RunSentimentBatchResult> {
@@ -228,141 +166,37 @@ export async function runSentimentBatch(
   let batchesProcessed = 0;
   let itemsScored = 0;
   let pairsWritten = 0;
-  let failures = 0;
-  let consecutiveFailures = 0;
-  let hitDailyCap = false;
+  const failures = 0;
 
   while (batchesProcessed < maxBatches) {
     const rows = fetchUnscoredBatch(batchSize);
-    if (rows.length === 0) {
-      console.log("[sentiment] no more unscored items, stopping.");
-      break;
-    }
+    if (rows.length === 0) break;
 
-    const batch = buildBatchInput(rows);
-    if (batch.length === 0) {
-      // All rows in this slice had empty text or no tickers - skip to avoid an
-      // infinite loop where the same rows keep coming back.
-      console.warn(
-        `[sentiment] batch had ${rows.length} rows but no usable text. Skipping ids: ${rows.map((r) => r.id).join(",")}`,
-      );
-      // Mark each ticker pair as a neutral 0-confidence row so the loop progresses.
-      for (const r of rows) {
-        const tickers = (r.tickers ?? "")
-          .split(",")
-          .map((t) => t.trim().toUpperCase())
-          .filter((t) => t.length > 0);
-        for (const ticker of tickers) {
-          upsertSentiment(r.id, ticker, "neutral", 0, 0, null, MODEL_VERSION);
-          pairsWritten += 1;
+    for (const row of rows) {
+      const text = `${row.title ?? ""} ${row.body ?? ""}`.trim();
+      const tickers = (row.tickers ?? "")
+        .split(",")
+        .map((t) => t.trim().toUpperCase())
+        .filter((t) => t.length > 0);
+
+      if (!text || tickers.length === 0) continue;
+
+      const { label, score, confidence } = analyzeText(text);
+      const summaryHe = pickSummary(label);
+
+      for (const ticker of tickers) {
+        try {
+          upsertSentiment(row.id, ticker, label, score, confidence, summaryHe, MODEL_VERSION);
+          pairsWritten++;
+        } catch {
+          // ignore FK violations (removed tickers)
         }
       }
-      batchesProcessed += 1;
-      continue;
+      itemsScored++;
     }
 
-    const allowedPairs = new Set<string>();
-    for (const b of batch)
-      for (const t of b.tickers) allowedPairs.add(`${b.item_id}:${t}`);
-
-    const prompt = buildPrompt(batch);
-    let stdout: string;
-    try {
-      stdout = await runClaude(prompt, { jsonResponse: true });
-    } catch (err) {
-      if (isDailyCapError(err)) {
-        console.warn("[sentiment] daily cap hit, stopping cleanly.");
-        hitDailyCap = true;
-        break;
-      }
-      failures += 1;
-      consecutiveFailures += 1;
-      console.error(
-        `[sentiment] runClaude failed (batch ${batchesProcessed + 1}, consecutive failures ${consecutiveFailures}): ${(err as Error).message}`,
-      );
-      batchesProcessed += 1;
-      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.error(
-          `[sentiment] ${MAX_CONSECUTIVE_FAILURES} consecutive failures, stopping.`,
-        );
-        break;
-      }
-      continue;
-    }
-
-    let parsedRows: ClaudeResponseRow[];
-    try {
-      parsedRows = parseClaudeOutput(stdout, allowedPairs);
-    } catch (err) {
-      failures += 1;
-      consecutiveFailures += 1;
-      console.error(
-        `[sentiment] parse failure (batch ${batchesProcessed + 1}, consecutive ${consecutiveFailures}): ${(err as Error).message}`,
-      );
-      console.error(`[sentiment] raw stdout head: ${stdout.slice(0, 400)}`);
-      batchesProcessed += 1;
-      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.error(
-          `[sentiment] ${MAX_CONSECUTIVE_FAILURES} consecutive failures, stopping.`,
-        );
-        break;
-      }
-      continue;
-    }
-
-    if (parsedRows.length === 0) {
-      failures += 1;
-      consecutiveFailures += 1;
-      console.error(
-        `[sentiment] batch ${batchesProcessed + 1} returned 0 valid rows (raw head: ${stdout.slice(0, 200)})`,
-      );
-      batchesProcessed += 1;
-      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.error(
-          `[sentiment] ${MAX_CONSECUTIVE_FAILURES} consecutive failures, stopping.`,
-        );
-        break;
-      }
-      continue;
-    }
-
-    // Write all rows that passed validation.
-    const writtenItemIds = new Set<number>();
-    for (const row of parsedRows) {
-      try {
-        upsertSentiment(
-          row.item_id,
-          row.ticker,
-          row.label,
-          row.score,
-          row.confidence,
-          row.summary_he,
-          MODEL_VERSION,
-        );
-        pairsWritten += 1;
-        writtenItemIds.add(row.item_id);
-      } catch (err) {
-        // Foreign-key violation (ticker not in tickers table) or out-of-range
-        // value the DB CHECK rejected. Don't blow up the whole batch.
-        console.error(
-          `[sentiment] upsert failed for item=${row.item_id} ticker=${row.ticker}: ${(err as Error).message}`,
-        );
-      }
-    }
-
-    itemsScored += writtenItemIds.size;
-    batchesProcessed += 1;
-    consecutiveFailures = 0;
-    console.log(
-      `[sentiment] batch ${batchesProcessed}: ${parsedRows.length} rows parsed, ${pairsWritten} pairs total, ${itemsScored} items scored.`,
-    );
+    batchesProcessed++;
   }
 
-  return {
-    batchesProcessed,
-    itemsScored,
-    pairsWritten,
-    failures,
-    hitDailyCap,
-  };
+  return { batchesProcessed, itemsScored, pairsWritten, failures, hitDailyCap: false };
 }

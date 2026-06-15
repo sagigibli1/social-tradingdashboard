@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
 const CHART_COLORS = ["#2962FF", "#F59E0B", "#26C6DA"];
 
 export default function OverviewPage() {
-  const topTickers = queryTrendingTickers("24h", 10);
+  const topTickers = queryTrendingTickers("24h", 50);
   const recentItems = queryFeedItems({ limit: 20 });
 
   const topThree = topTickers.slice(0, 3);

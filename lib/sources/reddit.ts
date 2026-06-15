@@ -1,30 +1,19 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/**
- * Reddit ingestor - Wave 1 Agent B.
- *
- * Wraps Apify `trudax/reddit-scraper-lite` to pull top posts of the day from
- * a hardcoded seed list of finance / tech / AI subs. 15-min disk cache so the
- * workshop demo can re-click "sync" without burning Apify credits.
- *
- * Field names from the actor's dataset can vary slightly between runs / item
- * types (post vs comment vs community). We defensively coalesce across the
- * commonly observed shapes (`id|postId`, `createdAt|created|createdAtIso`,
- * `score|ups|upVotes`, `numberOfComments|num_comments|numComments`,
- * `body|selftext|text`, `url|postUrl|permalink`).
- */
+// Reddit ingestor using public subreddit RSS feeds — no credentials needed.
+// Each subreddit exposes a top.rss feed; we parse it with rss-parser (already
+// a project dependency). 15-min disk cache to avoid hammering Reddit on repeated syncs.
 
 import fs from "fs";
 import path from "path";
-import { ApifyClient } from "apify-client";
+import Parser from "rss-parser";
 
 import { getExistingExternalIds, insertItems, tagTickers, getDb } from "../db";
 import type { IngestResult, Ingestor, NormalizedItem } from "../types";
 
-// ---------- config ----------
+// --- Config -----------------------------------------------------------------
 
 const SOURCE: "reddit" = "reddit";
-const ACTOR_ID = "trudax/reddit-scraper-lite";
-const ACTOR_TIMEOUT_SEC = 90;
+const CACHE_PATH = path.join(process.cwd(), "db", "cache", "reddit.json");
+const CACHE_TTL_SEC = 900;
 
 const SUBREDDITS = [
   "investing",
@@ -34,279 +23,151 @@ const SUBREDDITS = [
   "MachineLearning",
 ] as const;
 
-const MAX_ITEMS_PER_SUB = 20;
-
-const CACHE_PATH = path.join(process.cwd(), "db", "cache", "reddit.json");
-const CACHE_TTL_SEC = 900; // 15 min
-
-// Hebrew unicode range. If a post has any Hebrew char, tag it `he`.
 const HEBREW_RE = /[֐-׿]/;
 
-// ---------- cache ----------
+// --- Types ------------------------------------------------------------------
 
-type CachedShape = {
-  fetchedAt: number;
-  items: RedditRawPost[];
+type RedditRssItem = {
+  id: string;
+  title: string;
+  body: string | null;
+  url: string;
+  author: string | null;
+  published_at: number;
+  subreddit: string;
 };
+
+type CachedShape = { fetchedAt: number; items: RedditRssItem[] };
+
+// --- Cache ------------------------------------------------------------------
 
 function readCache(): CachedShape | null {
   try {
     if (!fs.existsSync(CACHE_PATH)) return null;
-    const txt = fs.readFileSync(CACHE_PATH, "utf-8");
-    const parsed = JSON.parse(txt) as CachedShape;
+    const parsed = JSON.parse(fs.readFileSync(CACHE_PATH, "utf-8")) as CachedShape;
     if (!parsed || typeof parsed.fetchedAt !== "number") return null;
-    const ageSec = Math.floor(Date.now() / 1000) - parsed.fetchedAt;
-    if (ageSec > CACHE_TTL_SEC) return null;
+    if (Math.floor(Date.now() / 1000) - parsed.fetchedAt > CACHE_TTL_SEC) return null;
     return parsed;
   } catch {
     return null;
   }
 }
 
-function writeCache(items: RedditRawPost[]): void {
+function writeCache(items: RedditRssItem[]): void {
   try {
     const dir = path.dirname(CACHE_PATH);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    const payload: CachedShape = {
-      fetchedAt: Math.floor(Date.now() / 1000),
-      items,
-    };
-    fs.writeFileSync(CACHE_PATH, JSON.stringify(payload), "utf-8");
+    fs.writeFileSync(CACHE_PATH, JSON.stringify({ fetchedAt: Math.floor(Date.now() / 1000), items }), "utf-8");
   } catch {
-    // cache is best-effort, never fatal
+    // best-effort
   }
 }
 
-// ---------- raw shape ----------
+// --- Fetch ------------------------------------------------------------------
 
-// Conservative interface, every field optional - the actor returns different
-// shapes for posts vs comments vs link-only posts.
-type RedditRawPost = {
-  id?: string;
-  postId?: string;
-  parsedId?: string;
-  dataType?: string;
-  title?: string;
-  body?: string;
-  selftext?: string;
-  text?: string;
-  url?: string;
-  postUrl?: string;
-  permalink?: string;
-  username?: string;
-  author?: string;
-  score?: number;
-  ups?: number;
-  upVotes?: number;
-  numberOfComments?: number;
-  num_comments?: number;
-  numComments?: number;
-  createdAt?: string | number;
-  createdAtIso?: string;
-  created?: number;
-  created_utc?: number;
-  community?: { name?: string };
-  subreddit?: string;
-  parsedCommunityName?: string;
-  // catchall for raw_json preservation
-  [k: string]: unknown;
-};
+const BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+const parser = new Parser({
+  timeout: 10000,
+  headers: { "User-Agent": BROWSER_UA },
+});
 
-// ---------- helpers ----------
+async function fetchSubreddit(sub: string): Promise<RedditRssItem[]> {
+  const feedUrl = `https://www.reddit.com/r/${sub}/top.rss?t=day&limit=25`;
+  const feed = await parser.parseURL(feedUrl);
+  return (feed.items ?? []).map((item) => {
+    // Reddit RSS id looks like: t3_<postid>
+    const nativeId = (item.id ?? item.guid ?? "").replace(/^t3_/, "").split("/").pop() ?? "";
+    const link = item.link ?? item.guid ?? "";
+    const postMatch = link.match(/\/comments\/([a-z0-9]+)\b/i);
+    const id = postMatch ? postMatch[1] : nativeId;
 
-function pickString(...vals: unknown[]): string | null {
-  for (const v of vals) {
-    if (typeof v === "string" && v.trim().length > 0) return v;
-  }
-  return null;
+    const published_at = item.pubDate
+      ? Math.floor(new Date(item.pubDate).getTime() / 1000)
+      : Math.floor(Date.now() / 1000);
+
+    // Strip HTML from content
+    const rawBody = item.content ?? item.contentSnippet ?? null;
+    const body = rawBody ? rawBody.replace(/<[^>]*>/g, "").trim() || null : null;
+
+    return {
+      id,
+      title: item.title ?? "",
+      body,
+      url: link.startsWith("http") ? link : `https://www.reddit.com${link}`,
+      author: (item.author ?? item.creator ?? null)?.replace(/^\/u\//i, "") ?? null,
+      published_at,
+      subreddit: sub,
+    };
+  }).filter((r) => r.id.length > 0);
 }
 
-function pickNumber(...vals: unknown[]): number {
-  for (const v of vals) {
-    if (typeof v === "number" && Number.isFinite(v)) return v;
-  }
-  return 0;
-}
-
-function parsePublishedSec(raw: RedditRawPost): number | null {
-  const candidates: unknown[] = [
-    raw.createdAt,
-    raw.createdAtIso,
-    raw.created,
-    raw.created_utc,
-  ];
-  for (const c of candidates) {
-    if (c == null) continue;
-    if (typeof c === "number" && Number.isFinite(c)) {
-      // Reddit native is unix seconds. Some actor versions return ms.
-      const sec = c > 1e12 ? Math.floor(c / 1000) : Math.floor(c);
-      if (sec > 0) return sec;
+async function fetchAllSubreddits(): Promise<RedditRssItem[]> {
+  const all: RedditRssItem[] = [];
+  for (const sub of SUBREDDITS) {
+    try {
+      const posts = await fetchSubreddit(sub);
+      all.push(...posts);
+    } catch (err) {
+      console.error(`[reddit] failed to fetch r/${sub}:`, (err as Error).message);
     }
-    if (typeof c === "string" && c.length > 0) {
-      const t = Date.parse(c);
-      if (!Number.isNaN(t)) return Math.floor(t / 1000);
-    }
+    // delay to avoid Reddit rate limiting
+    await new Promise((r) => setTimeout(r, 3000));
   }
-  return null;
+  return all;
 }
 
-function extractNativeId(raw: RedditRawPost): string | null {
-  const candidates = [raw.id, raw.postId, raw.parsedId];
-  for (const c of candidates) {
-    if (typeof c === "string" && c.trim().length > 0) return c.trim();
-  }
-  // Fallback: derive from permalink (`/r/<sub>/comments/<id>/<slug>/`)
-  const link = pickString(raw.permalink, raw.url, raw.postUrl);
-  if (link) {
-    const m = link.match(/\/comments\/([a-z0-9]+)\b/i);
-    if (m) return m[1];
-  }
-  return null;
-}
-
-function pickRedditUrl(raw: RedditRawPost): string | null {
-  // Prefer the reddit.com permalink over the linked-out article so dedup is
-  // stable and clicking lands you in the comment thread.
-  const candidates = [raw.permalink, raw.postUrl, raw.url];
-  for (const c of candidates) {
-    if (typeof c !== "string" || c.length === 0) continue;
-    if (c.startsWith("http")) return c;
-    if (c.startsWith("/r/")) return `https://www.reddit.com${c}`;
-  }
-  return null;
-}
+// --- Normalization ----------------------------------------------------------
 
 function detectLang(text: string): "en" | "he" | "other" {
-  if (!text) return "en";
   if (HEBREW_RE.test(text)) return "he";
   return "en";
 }
 
-function normalize(raw: RedditRawPost): NormalizedItem | null {
-  const nativeId = extractNativeId(raw);
-  if (!nativeId) return null;
-  const url = pickRedditUrl(raw);
-  if (!url) return null;
-  const published_at = parsePublishedSec(raw);
-  if (published_at == null) return null;
-
-  const title = pickString(raw.title);
-  const body = pickString(raw.body, raw.selftext, raw.text);
-  const author = pickString(raw.username, raw.author);
-  const score = pickNumber(raw.score, raw.ups, raw.upVotes);
-  const comments = pickNumber(
-    raw.numberOfComments,
-    raw.num_comments,
-    raw.numComments,
-  );
-
-  // Per plan: simple int weighting, db.ts will percentile-rank per source.
-  const engagement_raw = Math.round(score + comments * 3);
-
-  const langSample = `${title ?? ""} ${body ?? ""}`.trim();
-
+function normalize(raw: RedditRssItem): NormalizedItem | null {
+  if (!raw.id || !raw.url) return null;
+  const langSample = `${raw.title} ${raw.body ?? ""}`.trim();
   return {
     source_type: SOURCE,
-    external_id: `reddit:${nativeId}`,
-    url,
-    title,
-    body,
-    author,
-    published_at,
+    external_id: `reddit:${raw.id}`,
+    url: raw.url,
+    title: raw.title || null,
+    body: raw.body,
+    author: raw.author,
+    published_at: raw.published_at,
     lang: detectLang(langSample),
-    engagement_raw,
+    engagement_raw: 0,
     raw_json: raw,
   };
 }
 
-// ---------- actor invocation ----------
-
-function buildStartUrls(): { url: string }[] {
-  return SUBREDDITS.map((sub) => ({
-    url: `https://www.reddit.com/r/${sub}/top/?t=day`,
-  }));
-}
-
-async function fetchFromApify(token: string): Promise<RedditRawPost[]> {
-  const client = new ApifyClient({ token });
-
-  const run = await client.actor(ACTOR_ID).call(
-    {
-      startUrls: buildStartUrls(),
-      // maxItems is per actor run, not per startUrl. We multiply so each sub
-      // gets a fair share.
-      maxItems: MAX_ITEMS_PER_SUB * SUBREDDITS.length,
-      // Per actor input schema - these are the documented sort + time fields.
-      sort: "top",
-      time: "day",
-      // Lite actor focuses on posts by default; we still narrow defensively.
-      skipComments: true,
-      skipCommunity: true,
-      skipUserPosts: true,
-    },
-    { timeout: ACTOR_TIMEOUT_SEC },
-  );
-
-  const datasetId = run.defaultDatasetId;
-  const { items } = await client.dataset(datasetId).listItems();
-  return items as unknown as RedditRawPost[];
-}
-
-// ---------- ingestor ----------
+// --- Ingestor ---------------------------------------------------------------
 
 export class RedditIngestor implements Ingestor {
   async run(): Promise<IngestResult> {
     const failed: IngestResult["failed"] = [];
-    const result: IngestResult = {
-      source_type: SOURCE,
-      fetched: 0,
-      inserted: 0,
-      skipped_duplicates: 0,
-      failed,
-    };
+    const result: IngestResult = { source_type: SOURCE, fetched: 0, inserted: 0, skipped_duplicates: 0, failed };
 
-    const token = process.env.APIFY_API_TOKEN;
-    if (!token) {
-      failed.push({
-        reason: "missing APIFY_API_TOKEN",
-        sample: "env var unset",
-      });
-      return result;
-    }
-
-    // 1. Cache lookup
-    let raw: RedditRawPost[];
+    let raw: RedditRssItem[];
     const cached = readCache();
     if (cached) {
       raw = cached.items;
     } else {
       try {
-        raw = await fetchFromApify(token);
+        raw = await fetchAllSubreddits();
         writeCache(raw);
       } catch (err) {
-        failed.push({
-          reason: "apify call failed",
-          sample: (err as Error).message ?? String(err),
-        });
+        failed.push({ reason: "fetch-failed", sample: (err as Error).message.slice(0, 200) });
         return result;
       }
     }
 
     result.fetched = raw.length;
 
-    // 2. Normalize
     const normalized: NormalizedItem[] = [];
     for (const r of raw) {
       const n = normalize(r);
       if (!n) {
-        failed.push({
-          reason: "normalize: missing id/url/published_at",
-          sample: JSON.stringify({
-            id: r.id,
-            url: r.url ?? r.permalink ?? r.postUrl,
-            createdAt: r.createdAt,
-          }).slice(0, 200),
-        });
+        failed.push({ reason: "normalize: missing id/url", sample: JSON.stringify({ id: r.id }).slice(0, 200) });
         continue;
       }
       normalized.push(n);
@@ -314,31 +175,19 @@ export class RedditIngestor implements Ingestor {
 
     if (normalized.length === 0) return result;
 
-    // 3. Idempotency check - report what'd be skipped before insert.
     const ids = normalized.map((n) => n.external_id);
     const existing = getExistingExternalIds(SOURCE, ids);
     const fresh = normalized.filter((n) => !existing.has(n.external_id));
 
-    // insertItems is itself idempotent on UNIQUE(source_type, external_id)
-    // and handles tagging inline, but we re-tag any pre-existing rows in case
-    // ticker rules changed between syncs.
     const { inserted, skipped } = insertItems(fresh);
     result.inserted = inserted;
     result.skipped_duplicates = skipped + (normalized.length - fresh.length);
 
-    // 4. Re-tag any rows we already had (cheap, idempotent inside tagTickers).
     if (existing.size > 0) {
       const db = getDb();
       const rows = db
-        .prepare(
-          `SELECT id, title, body FROM items
-           WHERE source_type = ? AND external_id IN (${ids.map(() => "?").join(",")})`,
-        )
-        .all(SOURCE, ...ids) as {
-        id: number;
-        title: string | null;
-        body: string | null;
-      }[];
+        .prepare(`SELECT id, title, body FROM items WHERE source_type = ? AND external_id IN (${ids.map(() => "?").join(",")})`)
+        .all(SOURCE, ...ids) as { id: number; title: string | null; body: string | null }[];
       for (const row of rows) {
         const text = `${row.title ?? ""} ${row.body ?? ""}`.trim();
         if (text.length > 0) tagTickers(row.id, text);
