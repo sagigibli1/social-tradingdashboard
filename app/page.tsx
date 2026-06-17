@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Info } from "lucide-react";
 
 import {
   TerminalCard,
@@ -12,6 +13,12 @@ import { SentimentChip } from "@/components/ui/sentiment-chip";
 import { copy } from "@/lib/copy";
 import { getTrendSeries, queryFeedItems, queryTrendingTickers } from "@/lib/db";
 import { formatDate, formatNumber, formatVelocity } from "@/lib/format";
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+  TooltipProvider,
+} from "@/components/ui/tooltip";
 
 export const dynamic = "force-dynamic";
 
@@ -73,12 +80,24 @@ export default function OverviewPage() {
                     <td className="px-3 py-1.5 font-mono tabular-nums text-end text-[#D1D4DC]">
                       {formatNumber(t.mention_count)}
                     </td>
-                    <td
-                      className={`px-3 py-1.5 font-mono tabular-nums text-end ${
-                        spike ? "text-[#F59E0B]" : "text-[#787B86]"
-                      }`}
-                    >
-                      {formatVelocity(t.velocity ?? 0)}
+                    <td className="px-3 py-1.5 font-mono tabular-nums text-end">
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger>
+                            <span className="inline-flex items-center justify-end gap-1 cursor-help" title={copy.tooltipTrendExplain}>
+                              <span
+                                className={`${
+                                  spike ? "text-[#F59E0B]" : "text-[#787B86]"
+                                }`}
+                              >
+                                {formatVelocity(t.velocity ?? 0)}
+                              </span>
+                              <Info className="w-3 h-3 text-[#787B86]" aria-hidden="true" />
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent>{copy.tooltipTrendExplain}</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     </td>
                   </tr>
                 );

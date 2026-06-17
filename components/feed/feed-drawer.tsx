@@ -1,12 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ExternalLink, X } from "lucide-react";
+import { ExternalLink, X, Info } from "lucide-react";
 
 import { SentimentChip } from "@/components/ui/sentiment-chip";
 import { SourceBadge } from "@/components/ui/source-badge";
 import { copy } from "@/lib/copy";
 import { formatDate, formatNumber } from "@/lib/format";
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+  TooltipProvider,
+} from "@/components/ui/tooltip";
 import type { FeedItemRow, ItemSentimentRow } from "@/lib/db";
 
 type FeedDrawerProps = {
@@ -151,7 +157,17 @@ export function FeedDrawer({ item, onClose }: FeedDrawerProps) {
           <div className="flex justify-between">
             <span>{copy.feedDrawerEngagementLabel}</span>
             <span className="font-mono tabular-nums">
-              {formatNumber(Math.round(item.engagement_normalized * 100))}%
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger>
+                    <span className="inline-flex items-center gap-1 cursor-help" title={copy.tooltipEngagementExplain}>
+                      <span>{formatNumber(Math.round(item.engagement_normalized * 100))}%</span>
+                      <Info className="w-3 h-3 text-[#787B86]" aria-hidden="true" />
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent>{copy.tooltipEngagementExplain}</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </span>
           </div>
           <div className="flex justify-between">

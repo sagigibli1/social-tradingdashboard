@@ -1,10 +1,17 @@
 "use client";
 
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Info } from "lucide-react";
 
 import { SentimentChip } from "@/components/ui/sentiment-chip";
 import { SourceBadge } from "@/components/ui/source-badge";
 import { formatDate, formatNumber } from "@/lib/format";
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+  TooltipProvider,
+} from "@/components/ui/tooltip";
+import { copy } from "@/lib/copy";
 import { cn } from "@/lib/utils";
 import type { FeedItemRow } from "@/lib/db";
 
@@ -63,7 +70,17 @@ export function FeedRow({ item, selected, onSelect, onOpen }: FeedRowProps) {
         <SentimentChip label={item.sentiment_label} />
       </td>
       <td className="px-2 text-end font-mono tabular-nums text-[11px] text-[#787B86]">
-        {formatNumber(engagementPct)}%
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger>
+              <span className="inline-flex items-center gap-1 cursor-help" title={copy.tooltipEngagementExplain}>
+                <span>{formatNumber(engagementPct)}%</span>
+                <Info className="w-3 h-3 text-[#787B86]" aria-hidden="true" />
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{copy.tooltipEngagementExplain}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
       </td>
       <td className="px-2 w-8">
         <a

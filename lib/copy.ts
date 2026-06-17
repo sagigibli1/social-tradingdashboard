@@ -157,6 +157,12 @@ export const copy = {
   trendsForecastLabel: "תחזית מגמה",
   trendsActualLabel: "פעילות בפועל",
 
+  // Tooltip explanations (English)
+  tooltipTrendExplain:
+    "Trend multiplier comparing current mentions to the previous period. Example: 14.0x means this ticker is being mentioned about 14 times more than before.",
+  tooltipEngagementExplain:
+    "Percentile rank of this item's engagement against recent items from the same source. 100% means it is at the top of recent engagement.",
+
   // Sources page bits
   sourcesColType: "סוג מקור",
   sourcesColHandle: "ערוץ",

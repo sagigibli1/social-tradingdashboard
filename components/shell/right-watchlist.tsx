@@ -1,11 +1,17 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { ArrowDown, ArrowUp } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { ArrowDown, ArrowUp, Info } from "lucide-react";
 
 import { copy } from "@/lib/copy";
-import { formatNumber, formatVelocity } from "@/lib/format";
+import { formatDateShort, formatNumber, formatVelocity } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+  TooltipProvider,
+} from "@/components/ui/tooltip";
 import { SentimentChip } from "@/components/ui/sentiment-chip";
 import type { TrendingTickerRow } from "@/lib/db";
 
@@ -21,9 +27,34 @@ function labelFromAvg(
   return "neutral";
 }
 
-export function RightWatchlist({ tickers }: { tickers: TrendingTickerRow[] }) {
+export function RightWatchlist({ tickers: initialTickers }: { tickers: TrendingTickerRow[] }) {
   const [sortKey, setSortKey] = useState<SortKey>("mention_count");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [tickers, setTickers] = useState<TrendingTickerRow[]>(initialTickers);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const res = await fetch("/api/metrics/trends?window=24h&limit=12", { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const rows = (await res.json()) as TrendingTickerRow[];
+        if (!cancelled) setTickers(rows);
+      } catch { /* silent */ }
+    };
+    void refresh();
+    const timer = setInterval(() => void refresh(), 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
+  const lastUpdated = useMemo(() => {
+    if (tickers.length === 0) return null;
+    const latest = Math.max(...tickers.map((t) => t.window_start ?? 0));
+    return latest > 0 ? formatDateShort(latest) : null;
+  }, [tickers]);
 
   const sorted = useMemo(() => {
     const list = [...tickers];
@@ -54,8 +85,13 @@ export function RightWatchlist({ tickers }: { tickers: TrendingTickerRow[] }) {
       className="h-full w-[260px] border-r border-[#2A2E39] bg-[#131722] flex flex-col"
       aria-label={copy.watchlistTitle}
     >
-      <div className="h-8 px-3 flex items-center border-b border-[#2A2E39] text-[12px] font-semibold text-[#D1D4DC]">
-        {copy.watchlistTitle}
+      <div className="h-8 px-3 flex items-center justify-between border-b border-[#2A2E39] text-[12px] font-semibold text-[#D1D4DC]">
+        <span>{copy.watchlistTitle}</span>
+        {lastUpdated ? (
+          <span className="text-[10px] text-[#787B86] font-normal">
+            {`Updated ${lastUpdated}`}
+          </span>
+        ) : null}
       </div>
       {tickers.length === 0 ? (
         <div className="p-3 text-[12px] text-[#787B86]">
@@ -128,7 +164,17 @@ export function RightWatchlist({ tickers }: { tickers: TrendingTickerRow[] }) {
                         isSpike ? "text-[#F59E0B]" : "text-[#787B86]",
                       )}
                     >
-                      {formatVelocity(t.velocity ?? 0)}
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger>
+                            <span className="inline-flex items-center justify-end gap-1 cursor-help" title={copy.tooltipTrendExplain}>
+                              <span>{formatVelocity(t.velocity ?? 0)}</span>
+                              <Info className="w-3 h-3 text-[#787B86]" aria-hidden="true" />
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent>{copy.tooltipTrendExplain}</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     </td>
                     <td className="px-3 py-1.5 text-end">
                       <SentimentChip label={labelFromAvg(t.sentiment_avg)} />

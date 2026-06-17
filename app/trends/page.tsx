@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { X } from "lucide-react";
+import { X, Info } from "lucide-react";
 
 import {
   TerminalCard,
@@ -15,6 +15,12 @@ import { SentimentChip } from "@/components/ui/sentiment-chip";
 import { SourceBreakdownBar } from "@/components/ui/source-breakdown-bar";
 import { copy } from "@/lib/copy";
 import { formatDate, formatNumber, formatVelocity } from "@/lib/format";
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+  TooltipProvider,
+} from "@/components/ui/tooltip";
 import type {
   FeedItemRow,
   MentionTimePoint,
@@ -313,13 +319,23 @@ function TickerCard({
         </div>
         <div className="flex items-center justify-between text-[11px]">
           <span className="text-[#787B86]">{copy.trendsCardVelocity}</span>
-          <span
-            className={`font-mono tabular-nums ${
-              spike ? "text-[#F59E0B]" : "text-[#787B86]"
-            }`}
-          >
-            {arrow} {formatVelocity(velocity)}
-          </span>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger>
+                <span className="inline-flex items-center gap-1 cursor-help" title={copy.tooltipTrendExplain}>
+                  <span
+                    className={`font-mono tabular-nums ${
+                      spike ? "text-[#F59E0B]" : "text-[#787B86]"
+                    }`}
+                  >
+                    {arrow} {formatVelocity(velocity)}
+                  </span>
+                  <Info className="w-3 h-3 text-[#787B86]" aria-hidden="true" />
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>{copy.tooltipTrendExplain}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
       </TerminalCardBody>
     </TerminalCard>
