@@ -73,7 +73,7 @@ export function FeedRow({ item, selected, onSelect, onOpen }: FeedRowProps) {
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger>
-              <span className="inline-flex items-center gap-1 cursor-help" title={copy.tooltipEngagementExplain}>
+              <span className="inline-flex items-center gap-1 cursor-help">
                 <span>{formatNumber(engagementPct)}%</span>
                 <Info className="w-3 h-3 text-[#787B86]" aria-hidden="true" />
               </span>

@@ -159,9 +159,9 @@ export const copy = {
 
   // Tooltip explanations (English)
   tooltipTrendExplain:
-    "Trend multiplier comparing current mentions to the previous period. Example: 14.0x means this ticker is being mentioned about 14 times more than before.",
+    "How much more this stock is being talked about vs. its usual level. 9.0x = mentioned 9× more than normal. Higher number = bigger spike in attention.",
   tooltipEngagementExplain:
-    "Percentile rank of this item's engagement against recent items from the same source. 100% means it is at the top of recent engagement.",
+    "How popular this post is compared to other recent posts from the same source. 100% = most engaging post. Based on likes, shares, and comments.",
 
   // Sources page bits
   sourcesColType: "סוג מקור",

@@ -160,7 +160,7 @@ export function FeedDrawer({ item, onClose }: FeedDrawerProps) {
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger>
-                    <span className="inline-flex items-center gap-1 cursor-help" title={copy.tooltipEngagementExplain}>
+                    <span className="inline-flex items-center gap-1 cursor-help">
                       <span>{formatNumber(Math.round(item.engagement_normalized * 100))}%</span>
                       <Info className="w-3 h-3 text-[#787B86]" aria-hidden="true" />
                     </span>

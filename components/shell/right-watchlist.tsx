@@ -167,7 +167,7 @@ export function RightWatchlist({ tickers: initialTickers }: { tickers: TrendingT
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger>
-                            <span className="inline-flex items-center justify-end gap-1 cursor-help" title={copy.tooltipTrendExplain}>
+                            <span className="inline-flex items-center justify-end gap-1 cursor-help">
                               <span>{formatVelocity(t.velocity ?? 0)}</span>
                               <Info className="w-3 h-3 text-[#787B86]" aria-hidden="true" />
                             </span>

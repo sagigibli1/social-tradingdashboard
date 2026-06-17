@@ -84,7 +84,7 @@ export default function OverviewPage() {
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger>
-                            <span className="inline-flex items-center justify-end gap-1 cursor-help" title={copy.tooltipTrendExplain}>
+                            <span className="inline-flex items-center justify-end gap-1 cursor-help">
                               <span
                                 className={`${
                                   spike ? "text-[#F59E0B]" : "text-[#787B86]"

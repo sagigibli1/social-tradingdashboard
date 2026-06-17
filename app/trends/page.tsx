@@ -322,7 +322,7 @@ function TickerCard({
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger>
-                <span className="inline-flex items-center gap-1 cursor-help" title={copy.tooltipTrendExplain}>
+                <span className="inline-flex items-center gap-1 cursor-help">
                   <span
                     className={`font-mono tabular-nums ${
                       spike ? "text-[#F59E0B]" : "text-[#787B86]"
