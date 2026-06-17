@@ -29,7 +29,7 @@ function TooltipContent({
   className,
   side = "top",
   sideOffset = 4,
-  align = "center",
+  align = "end",
   alignOffset = 0,
   children,
   ...props
@@ -46,6 +46,7 @@ function TooltipContent({
         side={side}
         sideOffset={sideOffset}
         className="isolate z-50"
+        dir="rtl"
       >
         <TooltipPrimitive.Popup
           data-slot="tooltip-content"

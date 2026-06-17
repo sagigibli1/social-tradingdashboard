@@ -157,11 +157,11 @@ export const copy = {
   trendsForecastLabel: "תחזית מגמה",
   trendsActualLabel: "פעילות בפועל",
 
-  // Tooltip explanations (English)
+  // Tooltip explanations (Hebrew)
   tooltipTrendExplain:
-    "How much more this stock is being talked about vs. its usual level. 9.0x = mentioned 9× more than normal. Higher number = bigger spike in attention.",
+    "כמה יותר מדברים על המניה הזאת לעומת הרגיל. 9.0x = מוזכרת 9 פעמים יותר מהממוצע. מספר גבוה = פעילות יוצאת דופן.",
   tooltipEngagementExplain:
-    "How popular this post is compared to other recent posts from the same source. 100% = most engaging post. Based on likes, shares, and comments.",
+    "כמה הפוסט הזה פופולרי לעומת פוסטים אחרים מאותו מקור. 100% = הפוסט המעורב ביותר. מבוסס על לייקים, שיתופים ותגובות.",
 
   // Sources page bits
   sourcesColType: "סוג מקור",
